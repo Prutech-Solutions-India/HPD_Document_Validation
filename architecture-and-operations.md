@@ -1,6 +1,5 @@
 # HPD Document Verification — Architecture & Operations
 
-_Last updated: 2026-06-08 · Repo commit: `27213a8`_
 
 ---
 
