@@ -1,5 +1,6 @@
 # HPD Document Verification — Architecture & Operations
 
+_Last updated: 2026-06-09 · Repo commit: `dadbe1f`_
 
 ---
 
@@ -97,13 +98,13 @@ PDFs with a native text layer skip PaddleOCR (we read the layer directly), which
 
 ### Minimum viable — single host docker-compose (shipped)
 
-| Service                     | CPU          | RAM                   | Disk                                                             | Notes                          |
-| --------------------------- | ------------ | --------------------- | ---------------------------------------------------------------- | ------------------------------ |
-| `ui` (Next.js)              | 1 vCPU       | 512 MB                | 1 GB image                                                       | Port 80                        |
-| `api` (Uvicorn × 2 workers) | 2 vCPU       | 1 GB                  | 2 GB image                                                       | Internal-only                  |
-| `ollama`                    | **4–8 vCPU** | **8 GB** for 8B model | 5 GB model + cache                                               | Internal-only                  |
-| `postgres` (external)       | 1 vCPU       | 1 GB                  | 10 GB                                                            | Managed RDS / Aurora / on-prem |
-| Volumes                     | –            | –                     | `uploads` ~ N × 2 MB · `audit` ~ 5 KB/run · `ollama-models` 5 GB |                                |
+| Service                     | CPU          | RAM                   | Disk                                                             | Notes                                                           |
+| --------------------------- | ------------ | --------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------- |
+| `ui` (Next.js)              | 1 vCPU       | 512 MB                | 1 GB image                                                       | Port 80                                                         |
+| `api` (Uvicorn × 2 workers) | 2 vCPU       | 1 GB                  | 2 GB image                                                       | Internal-only                                                   |
+| `ollama`                    | **4–8 vCPU** | **8 GB** for 8B model | 5 GB model + cache                                               | Internal-only                                                   |
+| `db` (Postgres 16)          | 1 vCPU       | 1 GB                  | 10 GB                                                            | Bundled; swap to managed RDS / Aurora by setting `DATABASE_URL` |
+| Volumes                     | –            | –                     | `uploads` ~ N × 2 MB · `audit` ~ 5 KB/run · `ollama-models` 5 GB |                                                                 |
 
 **Recommended host: 8 vCPU / 16 GB RAM / 100 GB SSD, Linux + Docker Engine 24+. No GPU required.**
 
@@ -309,16 +310,151 @@ Measured on a Windows dev box, **CPU only**, `llama3.1:8b`, PaddleOCR warm.
 
 ---
 
-## 9. API Surface (Web-api, after `27213a8`)
+## 9. API Surface
 
-| Method | Path                | Auth | Description                                  |
-| ------ | ------------------- | ---- | -------------------------------------------- |
-| GET    | `/livez`            | no   | Liveness — process up, no external calls     |
-| GET    | `/readyz`           | no   | Readiness — Ollama reachable + mode snapshot |
-| GET    | `/health`           | no   | Back-compat alias for `/readyz`              |
-| POST   | `/api/pipeline/run` | yes  | Multipart upload; returns decision           |
+The stack exposes two HTTP surfaces:
 
-All other CRUD lives in the Web-UI's Next.js routes against Postgres.
+- **Web-UI (Next.js, port 80)** — owns auth, applicants, applications, documents, validation rules. All browser traffic terminates here.
+- **Web-api (FastAPI, port 81)** — pure verification engine. Token-gated. Called only by the UI (server-to-server).
+
+### 9.1 Web-api — verifier (FastAPI)
+
+| Method | Path                | Auth         | Description                                  |
+| ------ | ------------------- | ------------ | -------------------------------------------- |
+| GET    | `/livez`            | no           | Liveness — process up, no external calls     |
+| GET    | `/readyz`           | no           | Readiness — Ollama reachable + mode snapshot |
+| GET    | `/health`           | no           | Back-compat alias for `/readyz`              |
+| POST   | `/api/pipeline/run` | Bearer token | Multipart upload; returns decision           |
+
+### 9.2 Web-UI — application API (Next.js Route Handlers)
+
+All routes are session-cookie-authenticated (`requireAuth()`) unless flagged otherwise. Source under [Web-UI/src/app/api/](Web-UI/src/app/api/).
+
+| Method   | Path                               | Description                                                                                    |
+| -------- | ---------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `POST`   | `/api/auth/login`                  | **Public.** Email + password → sets JWT session cookie                                         |
+| `POST`   | `/api/auth/logout`                 | Clears session cookie                                                                          |
+| `GET`    | `/api/auth/me`                     | Current reviewer profile from the cookie                                                       |
+| `GET`    | `/api/applicants`                  | List applicants (master record, seeded externally)                                             |
+| `POST`   | `/api/upload`                      | Multipart upload → writes to S3, calls verifier, persists Document + rolls up case             |
+| `GET`    | `/api/applications/[id]`           | Application detail (case + applicant + documents + runs)                                       |
+| `POST`   | `/api/applications/[id]/runs`      | Re-run verification on the existing documents in the case                                      |
+| `GET`    | `/api/applications/[id]/runs`      | List verification runs for the application                                                     |
+| `POST`   | `/api/applications/[id]/verify`    | Finalise/lock a verified application                                                           |
+| `GET`    | `/api/documents/[id]/file`         | Stream the stored bytes from S3 (Open / Download buttons)                                      |
+| `DELETE` | `/api/documents/[id]`              | Soft-delete a document from the case                                                           |
+| `GET`    | `/api/document-types`              | List supported document types (35 NYC HPD types)                                               |
+| `POST`   | `/api/document-types`              | Create a new document type (admin)                                                             |
+| `PATCH`  | `/api/document-types/[id]`         | Rename / re-activate / deactivate                                                              |
+| `DELETE` | `/api/document-types/[id]`         | Hard-delete a document type (admin)                                                            |
+| `GET`    | `/api/document-field-checks`       | List validation rules grouped by document type                                                 |
+| `POST`   | `/api/document-field-checks`       | Create a validation rule (check_type ∈ extract/presence/not_expired/recent_within/cross_check) |
+| `PATCH`  | `/api/document-field-checks/[id]`  | Update a rule (active flag, kind, days, attr, …)                                               |
+| `DELETE` | `/api/document-field-checks/[id]`  | Remove a rule                                                                                  |
+| `GET`    | `/api/manual-review`               | Queue of cases needing reviewer attention                                                      |
+| `POST`   | `/api/manual-review/[id]/decision` | Reviewer decision: `approve` / `reject` with reason                                            |
+
+### 9.3 Deployed instance & host ports
+
+The single-host docker-compose stack publishes each container on a dedicated host port. Defaults below; all are overridable in `.env`.
+
+| Service         | Container port | Host port | Live URL (POC server `52.66.180.185`)                             | `.env` knob        |
+| --------------- | -------------- | --------- | ----------------------------------------------------------------- | ------------------ |
+| `ui` (Next.js)  | `3000`         | **80**    | http://52.66.180.185/login                                        | (fixed at 80)      |
+| `api` (FastAPI) | `8000`         | **81**    | http://52.66.180.185:81/livez                                     | `API_HOST_PORT`    |
+| `db` (Postgres) | `5432`         | **5432**  | `postgresql://postgres:postgres@52.66.180.185:5432/doc_verify_db` | `DB_HOST_PORT`     |
+| `ollama`        | `11434`        | **90**    | http://52.66.180.185:90/api/tags                                  | `OLLAMA_HOST_PORT` |
+
+**Reachable from the server / monitoring:**
+
+```bash
+# UI
+curl -I http://52.66.180.185/login
+
+# API health (no auth required)
+curl http://52.66.180.185:81/livez       # {"status":"alive"}
+curl http://52.66.180.185:81/readyz      # {"status":"ready","llm_health":"ok",...}
+curl http://52.66.180.185:81/health      # back-compat alias for /readyz
+
+# Verifier (POST, token-gated, rate-limited — UI calls this server-side only)
+curl -X POST http://52.66.180.185:81/api/pipeline/run \
+  -H "Authorization: Bearer $WEB_API_TOKEN" \
+  -F "file=@./passport.pdf" \
+  -F "document_type=passport" \
+  -F "applicant_name=Jane Doe"
+
+# DB (PG 16, requires creds)
+psql "postgresql://postgres:postgres@52.66.180.185:5432/doc_verify_db" -c "select count(*) from \"Applicant\";"
+
+# Ollama (model registry — confirms llama3.1:8b is pulled)
+curl http://52.66.180.185:90/api/tags
+```
+
+### 9.4 Demo credentials & end-to-end login + upload
+
+> **POC only.** Rotate the password and the `WEB_API_TOKEN` before any external demo.
+
+| What               | Value                                                                              |
+| ------------------ | ---------------------------------------------------------------------------------- |
+| Login URL          | http://52.66.180.185/login                                                         |
+| Reviewer email     | `subhadeep.roy@prutech.com`                                                        |
+| Reviewer password  | `password123`                                                                      |
+| Seeded applicants  | 10 (Priya Natarajan, Arjun Mehta, Ananya Iyer, Rohan Banerjee, Sneha Kapoor, …)    |
+| Test applicant ref | use any `reference` from the Applicants page (e.g. the first row in the dashboard) |
+| Default doc bucket | S3 `devteam-cms` / prefix `uploads/` in `ap-south-1`                               |
+
+Source of truth: [Web-UI/prisma/seed.ts](Web-UI/prisma/seed.ts) (`DEFAULT_USER_EMAIL` / `DEFAULT_USER_PASSWORD`) and [Web-UI/prisma/ensure-user.ts](Web-UI/prisma/ensure-user.ts) (recreates the reviewer if missing on boot).
+
+#### Browser flow (the way real users hit it)
+
+1. Open http://52.66.180.185/login.
+2. Sign in with `subhadeep.roy@prutech.com` / `password123`. The server sets an HTTP-only JWT cookie (`session` / `app_session`, depending on env).
+3. Navigate to **Applications** → pick (or create) an application for a seeded applicant.
+4. Click **Upload Document**, pick a `.pdf` / `.docx` / `.jpg` / `.png` (up to `MAX_UPLOAD_BYTES`, default 25 MB), choose a `document_type`. Multiple files upload in parallel.
+5. The case auto-rolls up to `PASSED` / `FAILED` / `MANUAL_REVIEW` / `DATA_MISMATCH` based on the verifier response.
+6. **Open** / **Download** on a document row streams the bytes back from S3 via `/api/documents/{id}/file`.
+
+#### Script flow (login + upload via curl)
+
+```bash
+# 1. Login → save the JWT cookie
+curl -s -c /tmp/hpd.cookies \
+  -H "Content-Type: application/json" \
+  -X POST http://52.66.180.185/api/auth/login \
+  -d '{"email":"subhadeep.roy@prutech.com","password":"password123"}'
+
+# 2. Confirm session
+curl -s -b /tmp/hpd.cookies http://52.66.180.185/api/auth/me
+
+# 3. List applicants → grab a reference
+curl -s -b /tmp/hpd.cookies http://52.66.180.185/api/applicants | jq '.[0].reference'
+
+# 4. Upload a document (multipart; field name `application_id` carries the
+#    Applicant.reference for backward compatibility)
+curl -s -b /tmp/hpd.cookies \
+  -X POST http://52.66.180.185/api/upload \
+  -F "file=@./Sample Files/passport.pdf" \
+  -F "application_id=APP-001" \
+  -F "document_type=passport"
+```
+
+**Security note:** all four ports default to `0.0.0.0`. For anything beyond a POC, restrict `:5432` and `:90` (Ollama) to the LAN / monitoring subnet at the firewall — only `:80` (UI) and `:81` (API health + token-gated pipeline) need public exposure. Note that `:90` is a privileged port (<1024), so the Docker daemon must run as root to bind it. TLS termination in front of `:80` / `:81` is roadmap item #TLS.
+
+### Supported `document_type` values
+
+The verifier knows **35 NYC HPD document types** (ported from the legacy .NET `DocumentType` enum). Each has a dedicated field-extraction spec in [`FIELD_SPECS`](Web-api/app/pipeline/prompts.py) and a rule set in [`RULES`](Web-api/app/pipeline/rules.py). Anything outside the list silently degrades to `other`.
+
+| Category              | `document_type` values                                                                                                                                                                                  |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Identity              | `passport`, `drivers_license`, `national_id`, `picture_id`, `military_id`, `ssn_card`, `birth_certificate`, `marriage_certificate`, `declaration_of_emancipation`, `legal_custody`, `school_enrollment` |
+| Employment / income   | `pay_stub`, `w2`, `tax_return`, `form_1040`, `form_1099`, `cash_payments`, `self_employment_income`                                                                                                     |
+| Government / benefits | `social_security_award_letter`, `ssi_ssdi`, `veterans_benefits`, `pa_budget_letter`, `armed_forces_reserves`, `pension_letter`, `unemployment`, `disability_certificate`                                |
+| Other income          | `child_support_alimony`, `dividends_annuity`, `rental_income`, `gift_income`                                                                                                                            |
+| Assets / banking      | `bank_statement`, `investment_account`, `real_estate_statement`                                                                                                                                         |
+| Housing               | `nycha_lease`, `section_8_proof`                                                                                                                                                                        |
+| Misc                  | `utility_bill`, `employment_letter`, `income_certificate`, `other`                                                                                                                                      |
+
+Recency windows match the HPD reference: pay stubs / W-2s / SSA / SSI / VA / PA / pension / Section 8 within **120 days**, bank statements within **90 days**, employment letters / income certificates within **365 days**.
 
 ---
 
@@ -327,7 +463,7 @@ All other CRUD lives in the Web-UI's Next.js routes against Postgres.
 ### Bring up
 
 ```bash
-cp .env.example .env             # fill in WEB_API_TOKEN, DATABASE_URL, JWT_SECRET
+cp .env.example .env             # set WEB_API_TOKEN and JWT_SECRET (DATABASE_URL optional — bundled `db` service is used if unset)
 docker compose up -d             # first run downloads the model (~5 GB)
 docker compose logs -f ollama-pull
 ```
@@ -335,17 +471,22 @@ docker compose logs -f ollama-pull
 ### Health probes
 
 ```bash
-curl http://localhost/api/livez                  # via UI proxy (when wired)
+# From anywhere with network reach to the server:
+curl http://52.66.180.185:81/livez      # process up
+curl http://52.66.180.185:81/readyz     # Ollama reachable + mode snapshot
+curl http://52.66.180.185:81/health     # back-compat alias for /readyz
+
+# From inside the host:
 docker compose exec api curl localhost:8000/readyz
 ```
 
 ### Smoke test
 
-```powershell
-curl -X POST http://localhost:8001/api/pipeline/run `
-  -H "Authorization: Bearer $env:WEB_API_TOKEN" `
-  -F "file=@C:/path/to/passport.pdf" `
-  -F "document_type=passport" `
+```bash
+curl -X POST http://52.66.180.185:81/api/pipeline/run \
+  -H "Authorization: Bearer $WEB_API_TOKEN" \
+  -F "file=@./passport.pdf" \
+  -F "document_type=passport" \
   -F "applicant_name=Jane Doe"
 ```
 
@@ -371,17 +512,17 @@ Audit JSON is partitioned by date under `AUDIT_DIR`. A log-rotation policy shoul
 
 ## 11. Roadmap (what's not done yet, prioritised)
 
-| #   | Item                                     | Why it matters                    |
-| --- | ---------------------------------------- | --------------------------------- |
-| 17  | Rate limit `/api/pipeline/run` (slowapi) | One client can pin Ollama         |
-| 12  | Long-lived `httpx.AsyncClient` to Ollama | Saves TCP setup per request       |
-| 13  | CI (GitHub Actions: pytest + tsc)        | Catch regressions                 |
-| –   | TLS / reverse proxy in front of UI       | HTTP only today                   |
-| –   | Object storage for `uploads/`            | Outgrows single host              |
-| 11  | PaddleOCR warmup log line at startup     | Surfaces first-request latency    |
-| 14  | Real per-line OCR confidence             | Currently flat 0.85 in some paths |
-| 15  | Locale-aware date parsing                | US-style only today               |
-| 18  | Ollama HA — retries + model fallback     | Single point of failure           |
+| #     | Item                                                                    | Why it matters                     |
+| ----- | ----------------------------------------------------------------------- | ---------------------------------- |
+| ✅ 17 | Rate limit `/api/pipeline/run` (in-process token bucket per token / IP) | One client can pin Ollama          |
+| ✅ 12 | Long-lived `httpx.AsyncClient` to Ollama                                | Saves TCP setup, frees worker loop |
+| ✅ 13 | CI (GitHub Actions: pytest + tsc)                                       | Catch regressions                  |
+| –     | TLS / reverse proxy in front of UI                                      | HTTP only today                    |
+| –     | Object storage for `uploads/`                                           | Outgrows single host               |
+| 11    | PaddleOCR warmup log line at startup                                    | Surfaces first-request latency     |
+| 14    | Real per-line OCR confidence                                            | Currently flat 0.85 in some paths  |
+| 15    | Locale-aware date parsing                                               | US-style only today                |
+| 18    | Ollama HA — retries + model fallback                                    | Single point of failure            |
 
 None of these are deployment blockers; the system as committed handles uploads end-to-end with real risk scores.
 
