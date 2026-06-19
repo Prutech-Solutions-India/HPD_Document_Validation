@@ -46,79 +46,291 @@ A partner application starts a KYC request, the customer completes OTP-based ver
 
 Base path: `/api/v1/ckyc`
 
+All responses follow a common envelope:
+
+```json
+{
+  "status": "success | failure",
+  "statusCode": "200 | 400 | 500",
+  "message": "...",
+  "result": { ... } | null,
+  "error": { "code": "...", "message": "..." } | null
+}
+```
+
+---
+
 ### 1. Initiate
 
 **`POST /initiate`** — Partner kicks off a KYC session.
 
-| Auth         | `X-API-KEY` header                                             |
-| ------------ | -------------------------------------------------------------- |
-| Request body | `clientId`, `transactionId`, `redirectUrl`, optional `payload` |
-| Returns      | `requestId`, `redirectUrl` (CholaMS UI + JWT)                  |
+**Auth:** `X-API-KEY: <CkycSettings:ApiKey>`
+
+**Request body:**
+
+| Field           | Type   | Required | Notes                                                       |
+| --------------- | ------ | -------- | ----------------------------------------------------------- |
+| `clientId`      | string | yes      | Must be in `CkycSettings:AllowedClientIds` whitelist        |
+| `transactionId` | string | yes      | Any partner-supplied correlation ID                         |
+| `redirectUrl`   | string | yes      | Must start with one of `CkycSettings:AllowedRedirectUrls`   |
+| `payload`       | object | no       | `firstName`, `lastName`, `mobile`, `email`, `dob` (strings) |
+
+**Sample request:**
 
 ```json
 {
   "clientId": "CHOLA_CLIENT_01",
   "transactionId": "TXN-TEST-001",
   "redirectUrl": "http://localhost:4200/callback",
-  "payload": { "firstName": "Rahul", "mobile": "9876543210" }
+  "payload": {
+    "firstName": "Rahul",
+    "lastName": "Sharma",
+    "mobile": "9876543210",
+    "email": "rahul@example.com",
+    "dob": "1990-05-15"
+  }
 }
 ```
+
+**Sample success (200):**
+
+```json
+{
+  "status": "success",
+  "statusCode": "200",
+  "message": "Operation completed successfully.",
+  "result": {
+    "requestId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "redirectUrl": "https://ckyc-app.com/start?token=<JWT>"
+  },
+  "error": null
+}
+```
+
+**Error codes:** `INVALID_API_KEY`, `INVALID_CLIENT`, `INVALID_REDIRECT_URL`
 
 ---
 
 ### 2. Validate
 
-**`GET /validate`** — UI calls this on landing to confirm the JWT and load the session.
+**`GET /validate`** — Angular UI calls this on landing to confirm the JWT and load the session. Also flips the status from `INITIATED` → `IN_PROGRESS` on first call.
 
-| Auth    | `Authorization: Bearer <JWT>`                                             |
-| ------- | ------------------------------------------------------------------------- |
-| Returns | `requestId`, `transactionId`, `status`, optional `payload`, `redirectUrl` |
+**Auth:** `Authorization: Bearer <JWT>` (issued in step 1)
+
+**Request:** no body. `requestId` is read from the JWT.
+
+**Sample success (200):**
+
+```json
+{
+  "status": "success",
+  "statusCode": "200",
+  "message": "Operation completed successfully.",
+  "result": {
+    "requestId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "transactionId": "TXN-TEST-001",
+    "status": "IN_PROGRESS",
+    "redirectUrl": "http://localhost:4200/callback",
+    "payload": { "firstName": "Rahul", "mobile": "9876543210" }
+  },
+  "error": null
+}
+```
+
+**Error codes:** `INVALID_TOKEN`, `NOT_FOUND`, `EXPIRED`, `ALREADY_PROCESSED`
 
 ---
 
 ### 3. Get OTP
 
-**`POST /get-otp`** — Triggers CKYC vendor to send OTP to the customer's mobile.
+**`POST /get-otp`** — Requests CKYC vendor to send OTP to the customer's mobile.
 
-| Auth         | `Authorization: Bearer <JWT>`     |
-| ------------ | --------------------------------- |
-| Request body | `idNo`, `idType`, `mobileNo`      |
-| Effect       | Calls vendor `POST /api/v1/start` |
+**Auth:** `Authorization: Bearer <JWT>`
+
+**Request body:**
+
+| Field      | Type   | Required | Notes                                      |
+| ---------- | ------ | -------- | ------------------------------------------ |
+| `idNo`     | string | yes      | CKYC reference number / identifier         |
+| `idType`   | string | yes      | Identifier type (e.g. `C` for CKYC)        |
+| `mobileNo` | string | yes      | 10-digit Indian mobile (`StringLength=10`) |
+
+**Sample request:**
+
+```json
+{
+  "idNo": "ABCDE1234F",
+  "idType": "C",
+  "mobileNo": "9876543210"
+}
+```
+
+**Effect:** Calls vendor `POST /api/v1/start` with headers `appId`, `appKey`.
+
+**Sample success (200):**
+
+```json
+{
+  "status": "success",
+  "statusCode": "200",
+  "message": "Operation completed successfully.",
+  "result": {
+    "status": "success",
+    "statusCode": "200",
+    "result": { "message": "OTP sent successfully", "requestId": "29478072" },
+    "error": null
+  },
+  "error": null
+}
+```
+
+**Error codes:** `NOT_FOUND`, `EXPIRED`, `CKYC_ERROR`
 
 ---
 
 ### 4. Verify OTP
 
-**`POST /verify-otp`** — Validates the OTP and downloads CKYC data.
+**`POST /verify-otp`** — Validates the OTP and downloads CKYC data from the vendor.
 
-| Auth         | `Authorization: Bearer <JWT>`                                                                      |
-| ------------ | -------------------------------------------------------------------------------------------------- |
-| Request body | `otp`, `requestId`                                                                                 |
-| Effect       | Calls vendor `POST /api/v1/validateOtpAndDownload` with the original `transactionId` in the header |
+**Auth:** `Authorization: Bearer <JWT>`
+
+**Request body:**
+
+| Field       | Type   | Required | Notes                                  |
+| ----------- | ------ | -------- | -------------------------------------- |
+| `otp`       | string | yes      | OTP received on customer mobile        |
+| `requestId` | string | yes      | The vendor `requestId` from `/get-otp` |
+
+**Sample request:**
+
+```json
+{
+  "otp": "123456",
+  "requestId": "29478072"
+}
+```
+
+**Effect:** Calls vendor `POST /api/v1/validateOtpAndDownload` with headers `transactionId` (from the stored CKYC request), `appId`, `appKey`.
+
+**Sample success (200):**
+
+```json
+{
+  "status": "success",
+  "statusCode": "200",
+  "message": "Operation completed successfully.",
+  "result": {
+    "status": "success",
+    "statusCode": "200",
+    "result": {
+      "ckycRefNo": 12345678901234,
+      "downloadCount": 1,
+      "residentialStatus": 1,
+      "relatedPersonDetails": []
+    },
+    "error": null
+  },
+  "error": null
+}
+```
+
+**Error codes:** `NOT_FOUND`, `EXPIRED`, `CKYC_ERROR`
 
 ---
 
 ### 5. Redirect
 
-**`POST /redirect`** — UI tells the API to issue a one-time `code` and build the partner redirect URL.
+**`POST /redirect`** — UI tells the API the outcome of the KYC flow. The API issues a one-time `code` (5-min, single-use) and builds the partner redirect URL.
 
-| Auth         | `Authorization: Bearer <JWT>`                    |
-| ------------ | ------------------------------------------------ |
-| Request body | `kycStatus`, optional `errorCode`/`errorMessage` |
-| Returns      | `redirectUrl` containing `code=...`              |
+**Auth:** `Authorization: Bearer <JWT>`
 
-The code is valid for 5 minutes, single-use.
+**Request body:**
+
+| Field          | Type   | Required | Notes                                                                |
+| -------------- | ------ | -------- | -------------------------------------------------------------------- |
+| `kycStatus`    | enum   | yes      | `COMPLETED`, `VERIFIED`, `REJECTED`, `FAILED` (serialized as string) |
+| `errorCode`    | string | no       | Used when `kycStatus` is not success                                 |
+| `errorMessage` | string | no       | Used when `kycStatus` is not success                                 |
+
+**Sample request (success):**
+
+```json
+{ "kycStatus": "COMPLETED" }
+```
+
+**Sample request (failure):**
+
+```json
+{
+  "kycStatus": "REJECTED",
+  "errorCode": "KYC_REJECTED",
+  "errorMessage": "Customer details did not match"
+}
+```
+
+**Sample success response:**
+
+```json
+{
+  "status": "success",
+  "statusCode": "200",
+  "message": "Operation completed successfully.",
+  "result": {
+    "redirectUrl": "http://localhost:4200/callback?code=<one-time-code>&status=completed&transactionId=TXN-TEST-001"
+  },
+  "error": null
+}
+```
+
+**Error codes:** `NOT_FOUND`, `NO_REDIRECT_URL`
 
 ---
 
 ### 6. Verify
 
-**`POST /verify`** — Partner exchanges the `code` for masked KYC result.
+**`POST /verify`** — Partner exchanges the `code` for the masked KYC result. Code is consumed on success.
 
-| Auth         | `X-API-KEY` header                                                                   |
-| ------------ | ------------------------------------------------------------------------------------ |
-| Request body | `clientId`, `transactionId`, `code`                                                  |
-| Returns      | `requestId`, `transactionId`, `kycStatus`, masked `kycData` (`pan`, `aadhaarMasked`) |
+**Auth:** `X-API-KEY: <CkycSettings:ApiKey>`
+
+**Request body:**
+
+| Field           | Type   | Required | Notes                                           |
+| --------------- | ------ | -------- | ----------------------------------------------- |
+| `clientId`      | string | yes      | Must match the one sent in `/initiate`          |
+| `transactionId` | string | yes      | Must match the one sent in `/initiate`          |
+| `code`          | string | yes      | One-time code from `/redirect` (5-min, one use) |
+
+**Sample request:**
+
+```json
+{
+  "clientId": "CHOLA_CLIENT_01",
+  "transactionId": "TXN-TEST-001",
+  "code": "k3l9Hn2pQrS7tUvWxYz0AbCdEfGh1Ij2"
+}
+```
+
+**Sample success (200):**
+
+```json
+{
+  "status": "success",
+  "statusCode": "200",
+  "message": "Operation completed successfully.",
+  "result": {
+    "requestId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "transactionId": "TXN-TEST-001",
+    "kycStatus": "COMPLETED",
+    "kycData": {
+      "pan": "XXXXXX234F",
+      "aadhaarMasked": "XXXX-XXXX-5678"
+    }
+  },
+  "error": null
+}
+```
+
+**Error codes:** `INVALID_API_KEY`, `INVALID_CODE`, `CODE_USED`, `CODE_EXPIRED`, `MISMATCH`, `NOT_FOUND`
 
 ---
 
