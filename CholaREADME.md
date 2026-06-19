@@ -6,24 +6,6 @@ A partner application starts a KYC request, the customer completes OTP-based ver
 
 ---
 
-## Table of Contents
-
-- [Overview](#overview)
-- [API Details](#api-details)
-  - [1. Initiate](#1-initiate)
-  - [2. Validate](#2-validate)
-  - [3. Get OTP](#3-get-otp)
-  - [4. Verify OTP](#4-verify-otp)
-  - [5. Redirect](#5-redirect)
-  - [6. Verify](#6-verify)
-- [Workflow Diagram](#workflow-diagram)
-- [Technical Diagram](#technical-diagram)
-- [Project Structure](#project-structure)
-- [Configuration](#configuration)
-- [Getting Started](#getting-started)
-
----
-
 ## Overview
 
 | Layer    | Technology                                  |
@@ -42,9 +24,65 @@ A partner application starts a KYC request, the customer completes OTP-based ver
 
 ---
 
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                       Client Application                            │
+│  (Third-party system that wants to perform CKYC for its customer)   │
+└─────────────┬───────────────────────────────────────────────────────┘
+              │ 1. POST /api/v1/ckyc/initiate  (X-API-KEY)
+              ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                      CholaMS Backend API                            │
+│  ┌────────────────┐   ┌──────────────────┐   ┌──────────────────┐   │
+│  │ CkycController │ → │  CkycRepository  │ → │ Oracle DB + SDK  │   │
+│  └────────────────┘   └──────────────────┘   └──────────────────┘   │
+│         │                                                           │
+│         │ Returns JWT token embedded in redirect URL                │
+│         ▼                                                           │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │   JWT Token (claims: requestId, transactionId, 10 min TTL)  │    │
+│  └─────────────────────────────────────────────────────────────┘    │
+└─────────────┬───────────────────────────────────────────────────────┘
+              │ 2. Redirect user's browser to:
+              │    https://ckyc-app.com/start?token=<JWT>
+              ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                     CholaMS Angular Frontend                        │
+│  StartComponent → AuthService → KycComponent → KycOtpComponent      │
+│         │                                                           │
+│         │ All API calls include: Authorization: Bearer <JWT>        │
+│         ▼                                                           │
+│  GET  /api/v1/ckyc/validate     (validates session)                 │
+│  POST /api/v1/ckyc/get-otp      (sends OTP to customer)             │
+│  POST /api/v1/ckyc/verify-otp   (verifies OTP + downloads KYC)      │
+│  POST /api/v1/ckyc/redirect     (gets redirect URL with status)     │
+└─────────────┬───────────────────────────────────────────────────────┘
+              │ 3. Redirect back to client with one-time code
+              ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                       Client Application                            │
+│  POST /api/v1/ckyc/verify  (X-API-KEY, exchanges code for KYC data) │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## API Details
 
 Base path: `/api/v1/ckyc`
+
+### API Summary
+
+| #   | Endpoint      | Method | Called By   | Auth           | Purpose                                                   |
+| --- | ------------- | ------ | ----------- | -------------- | --------------------------------------------------------- |
+| 1   | `/initiate`   | POST   | Partner App | `X-API-KEY`    | Kick off a KYC session, get JWT redirect URL for the user |
+| 2   | `/validate`   | GET    | Angular UI  | `Bearer <JWT>` | Validate session on landing, mark request `IN_PROGRESS`   |
+| 3   | `/get-otp`    | POST   | Angular UI  | `Bearer <JWT>` | Trigger CKYC vendor to send OTP to customer mobile        |
+| 4   | `/verify-otp` | POST   | Angular UI  | `Bearer <JWT>` | Validate OTP and download CKYC data from vendor           |
+| 5   | `/redirect`   | POST   | Angular UI  | `Bearer <JWT>` | Issue one-time `code` and build partner redirect URL      |
+| 6   | `/verify`     | POST   | Partner App | `X-API-KEY`    | Exchange `code` for masked KYC result                     |
 
 All responses follow a common envelope:
 
@@ -491,3 +529,23 @@ Default URLs:
 - UI: `http://localhost:4200`
 - Swagger: `http://localhost:5000/swagger`
 - Health: `GET /api/v1/health`
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Architecture Overview](#architecture-overview)
+- [API Details](#api-details)
+  - [API Summary](#api-summary)
+  - [1. Initiate](#1-initiate)
+  - [2. Validate](#2-validate)
+  - [3. Get OTP](#3-get-otp)
+  - [4. Verify OTP](#4-verify-otp)
+  - [5. Redirect](#5-redirect)
+  - [6. Verify](#6-verify)
+- [Workflow Diagram](#workflow-diagram)
+- [Technical Diagram](#technical-diagram)
+- [Project Structure](#project-structure)
+- [Configuration](#configuration)
+- [Getting Started](#getting-started)
