@@ -174,12 +174,12 @@ Thresholds (constants in [`forensics.py`](Web-api/app/pipeline/forensics.py)): `
 
 Nothing in the stack compresses anything today. Three candidates exist and they are **not** equally safe — the stored original must stay byte-exact.
 
-| Target                             | Verdict                                | Why                                                                                                                                                                                                                                                                                                          |
-| ---------------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Uploaded originals in S3           | **Never re-encode**                    | [`forensics.py`](Web-api/app/pipeline/forensics.py) is built on byte-exact originals: re-saving changes the `sha256` (kills `duplicate_file`), makes every JPEG look spliced to ELA, and rewrites or destroys EXIF `Software` / `DateTime` and PDF `/ModDate`, `%%EOF` counts and `/FreeText` annotations. |
-| Uploaded originals — storage class | **Use this instead**                   | PDFs and JPEGs are already compressed, so gzip buys ~2%. Cut cost with S3 Intelligent-Tiering or a lifecycle rule to Glacier IR, not with re-encoding.                                                                                                                                                       |
-| Rendered page images → LLM         | **Safe win, verify accuracy first**    | [`_encode_png`](Web-api/app/pipeline/docread.py) emits lossless PNG, the wrong codec for a rasterised page. JPEG q≈85 typically cuts the payload 3–6×, shrinking the base64 bloat (+33%) and Ollama's image-preprocessing time. These are _derived_ images, so forensics is unaffected — but the model reads 8pt print, so regression-test extraction before switching. `DOC_RENDER_SCALE` is the bigger lever. |
-| `audit/YYYY-MM-DD/*.jsonl`         | **Safe win**                           | Pure text, compresses ~10–20×. Gzip on daily rotation — closed days only, never the active file, since the audit record is append-only regulatory evidence.                                                                                                                                                  |
+| Target                             | Verdict                             | Why                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------------------------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Uploaded originals in S3           | **Never re-encode**                 | [`forensics.py`](Web-api/app/pipeline/forensics.py) is built on byte-exact originals: re-saving changes the `sha256` (kills `duplicate_file`), makes every JPEG look spliced to ELA, and rewrites or destroys EXIF `Software` / `DateTime` and PDF `/ModDate`, `%%EOF` counts and `/FreeText` annotations.                                                                                                      |
+| Uploaded originals — storage class | **Use this instead**                | PDFs and JPEGs are already compressed, so gzip buys ~2%. Cut cost with S3 Intelligent-Tiering or a lifecycle rule to Glacier IR, not with re-encoding.                                                                                                                                                                                                                                                          |
+| Rendered page images → LLM         | **Safe win, verify accuracy first** | [`_encode_png`](Web-api/app/pipeline/docread.py) emits lossless PNG, the wrong codec for a rasterised page. JPEG q≈85 typically cuts the payload 3–6×, shrinking the base64 bloat (+33%) and Ollama's image-preprocessing time. These are _derived_ images, so forensics is unaffected — but the model reads 8pt print, so regression-test extraction before switching. `DOC_RENDER_SCALE` is the bigger lever. |
+| `audit/YYYY-MM-DD/*.jsonl`         | **Safe win**                        | Pure text, compresses ~10–20×. Gzip on daily rotation — closed days only, never the active file, since the audit record is append-only regulatory evidence.                                                                                                                                                                                                                                                     |
 
 ### Network topology (compose)
 
@@ -437,10 +437,42 @@ Audit JSON is partitioned by date under `AUDIT_DIR`. A log-rotation policy shoul
 | –     | TLS / reverse proxy in front of UI                                      | HTTP only today                        |
 | ✅ –  | S3 object storage for uploads                                           | Shared by construction across replicas |
 | –     | Queue + event bus (see §11 target architecture)                         | Synchronous pipeline caps throughput   |
+| –     | `classify` stage — identify the document type before extraction (§10.1) | Type is currently taken on trust       |
 | 15    | Locale-aware date parsing                                               | US-style only today                    |
 | 18    | Ollama HA — retries + model fallback                                    | Single point of failure                |
 
 None of these are deployment blockers; the system as committed handles uploads end-to-end with real risk scores.
+
+### 10.1 Planned: `classify` stage — identify the document before extracting
+
+> **Status: specified, not shipped.** No `classify` module exists in [Web-api/app/pipeline/](Web-api/app/pipeline/) today.
+
+**Problem.** `document_type` is already optional on both endpoints (`Optional[DocumentType] = Form(None)` in [main.py](Web-api/app/main.py)) and reviewers frequently upload without picking one. Today an absent selection silently becomes `"other"`, which resolves to the generic `FIELD_SPECS["other"]` spec — `document_title`, `issuing_authority`, `applicant_name`, `date` — so a passport uploaded with no type set is never checked for an expiry date, and no rule set applies. A **wrong** selection is worse: the pipeline trusts it, `build_extraction_prompt` states it as fact to the model, and a pay stub filed as `passport` produces missing-field failures that look like a document defect rather than a filing error.
+
+**Proposal.** Insert a `classify` stage between `read` and `llm`:
+
+```
+forensics → read → classify → llm → rules → match → score
+```
+
+The stage sends the page images / text layer to the same vision model with a short prompt listing the known catalog codes and asks for `{"document_type": "...", "confidence": 0.0}`. The result then gates the rest of the run:
+
+| Condition                                                          | Outcome                                                                |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| Detected type is in the catalog, no user selection                 | **Proceed** using the detected type as the effective `document_type`   |
+| Detected type matches the user's selection                         | **Proceed** — selection confirmed                                      |
+| Detected type is not in the catalog, or confidence below threshold | **Return early** — `MANUAL_REVIEW`, "could not identify document type" |
+| Detected type contradicts the user's selection                     | **Return early** — `DATA_MISMATCH`, "uploaded a _X_, filed as _Y_"     |
+
+Both early returns happen **before** the extraction call, so a misfiled document costs one LLM round-trip instead of two.
+
+**Design constraints worth settling before implementation:**
+
+- **Which vocabulary does the classifier emit?** There are two in the repo: legacy short codes (`passport`, `pay_stub`) in [`FIELD_SPECS`](Web-api/app/pipeline/prompts.py) / [`RULES`](Web-api/app/pipeline/rules.py), and catalog codes (`primary_document__drivers_license`) in [`DOCUMENT_RULES`](Web-api/app/pipeline/document_rules.py). Document types are also DB-driven and editable via `/api/document-types`, so the prompt's list has to be built at runtime, not hardcoded.
+- **Cost.** Classification is a second `/api/generate` call. Prompt processing of the page images dominates on CPU, so this is not a cheap add — expect it to roughly double per-document latency unless the [LLM response cache](Web-api/app/pipeline/llm.py) is extended to cover it (its `_cache_key` currently includes `document_type`, which a classify call does not have yet).
+- **Status vocabulary.** Reusing `MANUAL_REVIEW` / `DATA_MISMATCH` avoids a Prisma migration; a dedicated `TYPE_MISMATCH` value would read better in the UI but requires a schema change plus badge/filter updates in the Web-UI.
+- **Fail-open vs fail-closed.** A hard `FAILED` on an unrecognised document would reject genuine-but-unusual paperwork on a classifier's word. `MANUAL_REVIEW` keeps a human in the loop, consistent with how low LLM confidence is already handled in [`score.py`](Web-api/app/pipeline/score.py).
+- **`PIPELINE_STAGES`** in [runner.py](Web-api/app/pipeline/runner.py) is kept in lockstep with the Web-UI progress component, so adding `classify` is a coordinated front-end + back-end change.
 
 ---
 
