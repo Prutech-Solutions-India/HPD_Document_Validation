@@ -36,20 +36,20 @@ What happens when new data arrives in the Data Lake. Work is triggered by an **e
 
 ```mermaid
 flowchart TB
-    A["1 - New data lands in Data Lake"] --> B["2 - Emit NewDataAvailable event"]
-    B --> C["3 - Publish to Event Bus / Message Broker"]
-    C --> D["4 - Enqueue work item on processing queue"]
-    D --> E["5 - Worker Service consumes message"]
-    E --> F["6 - Validate<br/>schema, required fields, ranges, checksum"]
-    F -- "invalid" --> QUAR["Quarantine zone + DataRejected event"]
-    F -- "valid" --> G["7 - Clean & normalize<br/>units, encodings, nulls, dedupe"]
-    G --> H["8 - Transform & enrich<br/>joins, lookups, region, business unit"]
-    H --> I{"9 - Detect data type"}
-    I -- "Structured" --> J["ETL / Dimensional modelling"]
-    I -- "Unstructured" --> K["Document processing branch"]
+    A["1 - New data lands<br/>in Data Lake"] --> B["2 - Emit<br/>NewDataAvailable<br/>event"]
+    B --> C["3 - Publish to<br/>Event Bus /<br/>Message Broker"]
+    C --> D["4 - Enqueue work item<br/>on processing queue"]
+    D --> E["5 - Worker Service<br/>consumes message"]
+    E --> F["6 - Validate<br/>schema, fields,<br/>ranges, checksum"]
+    F -- "invalid" --> QUAR["Quarantine zone +<br/>DataRejected event"]
+    F -- "valid" --> G["7 - Clean & normalize<br/>units, encodings,<br/>nulls, dedupe"]
+    G --> H["8 - Transform & enrich<br/>joins, lookups,<br/>region, business unit"]
+    H --> I{"9 - Detect<br/>data type"}
+    I -- "Structured" --> J["ETL / Dimensional<br/>modelling"]
+    I -- "Unstructured" --> K["Document processing<br/>branch"]
     J --> L[("SQL Database /<br/>Data Warehouse")]
     K --> M[("Vector Database")]
-    L --> N["Emit IngestionCompleted event"]
+    L --> N["Emit<br/>IngestionCompleted<br/>event"]
     M --> N
 ```
 
@@ -63,21 +63,21 @@ What a single worker does with one message, including how it fails safely.
 
 ```mermaid
 flowchart TB
-    A["Consume queue message"] --> B["Read source data from lake<br/>using the URI in the message"]
-    B --> C["Validate schema & business rules"]
-    C --> D["Transform & normalize"]
+    A["Consume queue<br/>message"] --> B["Read source data<br/>from lake by URI"]
+    B --> C["Validate schema<br/>& business rules"]
+    C --> D["Transform &<br/>normalize"]
     D --> E{"Data type?"}
-    E -- "Structured" --> F["Map to warehouse model"]
-    E -- "Unstructured" --> G["Extract text -> chunk"]
+    E -- "Structured" --> F["Map to<br/>warehouse model"]
+    E -- "Unstructured" --> G["Extract text<br/>then chunk"]
     G --> H["Generate embeddings<br/>batched calls"]
-    H --> I["Generate & attach metadata"]
-    F --> J["Persist structured data<br/>idempotent upsert"]
-    I --> K["Persist vector data<br/>deterministic chunk key"]
-    J --> L["Emit IngestionCompleted event"]
+    H --> I["Generate & attach<br/>metadata"]
+    F --> J["Persist structured<br/>idempotent upsert"]
+    I --> K["Persist vectors<br/>deterministic key"]
+    J --> L["Emit<br/>IngestionCompleted"]
     K --> L
-    L --> M["Emit logs, metrics, traces"]
-    C -- "invalid / poison" --> DLQ[("Dead Letter Queue")]
-    D -- "transient error" --> RTY["Retry with exponential backoff"]
+    L --> M["Emit logs,<br/>metrics, traces"]
+    C -- "invalid / poison" --> DLQ[("Dead Letter<br/>Queue")]
+    D -- "transient error" --> RTY["Retry with<br/>exponential backoff"]
     RTY -- "attempts exhausted" --> DLQ
 ```
 
@@ -96,32 +96,32 @@ What happens per user question. Routing is decided **server-side by the Agent**,
 ```mermaid
 flowchart TB
     U["User"] --> UI["Web UI"]
-    UI --> GW["API Gateway<br/>TLS, rate limit, WAF, routing"]
-    GW --> AU["Authentication<br/>validate JWT / OIDC token"]
-    AU --> AZ["Authorization<br/>roles, tenant, allowed regions"]
-    AZ --> API["Backend API<br/>builds trusted SecurityContext"]
+    UI --> GW["API Gateway<br/>TLS, rate limit,<br/>WAF, routing"]
+    GW --> AU["Authentication<br/>validate JWT /<br/>OIDC token"]
+    AU --> AZ["Authorization<br/>roles, tenant,<br/>allowed regions"]
+    AZ --> API["Backend API<br/>builds trusted<br/>SecurityContext"]
     API --> CACHE{"Cache hit?"}
-    CACHE -- "yes" --> RESP["Return cached response"]
-    CACHE -- "no" --> AG["AI Agent / Orchestrator"]
+    CACHE -- "yes" --> RESP["Return cached<br/>response"]
+    CACHE -- "no" --> AG["AI Agent /<br/>Orchestrator"]
     AG --> IR{"Intent Router<br/>classify & plan"}
     IR -- "structured" --> T1["QueryStructuredData"]
     IR -- "knowledge" --> T2["SearchKnowledgeBase"]
     IR -- "prediction" --> T3["PredictFailure"]
     IR -- "analytics" --> T4["RunAnalytics"]
-    IR -- "mixed" --> T5["Plan: multiple tools"]
+    IR -- "mixed" --> T5["Plan:<br/>multiple tools"]
     T1 --> DS1[("SQL / Warehouse")]
     T2 --> DS2[("Vector DB")]
-    T3 --> DS3["ML Inference Service"]
-    T4 --> DS4[("Analytics / Aggregates")]
+    T3 --> DS3["ML Inference<br/>Service"]
+    T4 --> DS4[("Analytics /<br/>Aggregates")]
     T5 --> T1
     T5 --> T2
-    DS1 --> AGG["Aggregate tool results<br/>+ provenance"]
+    DS1 --> AGG["Aggregate results<br/>+ provenance"]
     DS2 --> AGG
     DS3 --> AGG
     DS4 --> AGG
-    AGG --> LLM["LLM<br/>structure, summarize, explain<br/>grounded in supplied context only"]
-    LLM --> API2["Backend API<br/>validate, redact, attach citations"]
-    API2 --> UI2["Web UI<br/>answer + sources + confidence"]
+    AGG --> LLM["LLM<br/>structure, summarize,<br/>explain - grounded<br/>in supplied context"]
+    LLM --> API2["Backend API<br/>validate, redact,<br/>attach citations"]
+    API2 --> UI2["Web UI<br/>answer + sources<br/>+ confidence"]
     RESP --> UI2
 ```
 
@@ -137,15 +137,15 @@ How a document question is answered. The mirror of ingestion: indexing ran once 
 flowchart TB
     Q["User question"] --> AG["Agent"]
     AG --> RS["RAG Service"]
-    RS --> QE["Embed the query<br/>same model & version as indexing"]
-    QE --> PF["Pre-filter by metadata<br/>TenantId, AllowedRegions,<br/>DocumentType, Version, date"]
-    PF --> VS["Vector similarity search<br/>+ optional keyword hybrid"]
-    VS --> TK["Top-K candidate chunks"]
-    TK --> RR["Re-rank & de-duplicate<br/>drop low-relevance chunks"]
-    RR --> CTX["Assemble bounded context<br/>with citations"]
+    RS --> QE["Embed the query<br/>same model & version<br/>as indexing"]
+    QE --> PF["Pre-filter by metadata<br/>TenantId,<br/>AllowedRegions,<br/>DocumentType, date"]
+    PF --> VS["Vector similarity<br/>search + optional<br/>keyword hybrid"]
+    VS --> TK["Top-K candidate<br/>chunks"]
+    TK --> RR["Re-rank &<br/>de-duplicate"]
+    RR --> CTX["Assemble bounded<br/>context with citations"]
     CTX --> LLM["LLM"]
     LLM --> A["Grounded answer<br/>with source references"]
-    RR -- "nothing relevant found" --> NF["Return 'no supporting<br/>information found'<br/>instead of guessing"]
+    RR -- "nothing relevant" --> NF["Return 'no supporting<br/>information found'<br/>instead of guessing"]
 ```
 
 Two details that are easy to get wrong:
